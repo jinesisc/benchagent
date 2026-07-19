@@ -1,7 +1,8 @@
 import numpy as np
 np.set_printoptions(legacy='1.25')
 
-from benchagent.drivers.base import FuncGen, Scope
+from benchagent.drivers.base import FuncGen, Scope, Waveform
+
 
 class MockBench(FuncGen, Scope):          # <-- MULTIPLE INHERITANCE: this class promises
     """Simulated bench: func gen -> RC low-pass -> scope."""  # to implement BOTH contracts.
@@ -27,7 +28,7 @@ class MockBench(FuncGen, Scope):          # <-- MULTIPLE INHERITANCE: this class
 
     # ---- FuncGen contract -------------------------------------------------
 
-    def set_sine(self, freq_hz, amplitude_vpp, offset_v=0.0):
+    def set_sine(self, freq_hz, amplitude_vpp, offset_v = 0.0):
         # 'self' is always the first parameter of a method — it's the instance
         # itself. You don't pass it; bench.set_sine(1000, 2.0) fills it in.
         if freq_hz <= 0:
@@ -44,39 +45,59 @@ class MockBench(FuncGen, Scope):          # <-- MULTIPLE INHERITANCE: this class
 
     # ---- Scope contract ---------------------------------------------------
 
+
     def _gain_at(self, f):
         # Helper method (underscore = internal). THE PHYSICS GOES HERE:
         return 1 / np.sqrt(1 + (f / self.fc) ** 2)
 
+    def _phase_at(self, f):
+        return -np.arctan(f/self.fc)
+
+    def _signal_at(self, channel):
+        if channel in (1, 2):
+            if channel == 1:
+                return self._amplitude_vpp, 0.0
+            else:
+                return self._amplitude_vpp * self._gain_at(self._freq_hz), self._phase_at(self._freq_hz)
+        else:
+            raise ValueError(f"channel {channel} not supported")
 
     def _noise(self):
         # np.random.normal(mean, std_dev) -> one Gaussian random sample.
         return np.random.normal(0.0, self.noise_vrms)
 
     def measure_vpp(self, channel):
-        if channel in (1, 2):
-            if self._output_on:
-                if channel == 1:
-                    return self._amplitude_vpp + self._noise()
-                else:
-                    return self._amplitude_vpp * self._gain_at(self._freq_hz) + self._noise()
-            else:
-                return self._noise()
+        if self._output_on:
+            amplitude, _ = self._signal_at(channel)
+            return max(0.0, amplitude + self._noise())
         else:
-            raise ValueError(f"Channel {channel} not supported")
-
-
-
-
-
-
+            return max(0.0, self._noise())
 
     def measure_vrms(self, channel):
-        # TODO: for a sine, Vrms = Vpp / (2 * sqrt(2)) — derive it on paper first
-        ...
+        if self._output_on:
+            amplitude, _ = self._signal_at(channel)
+            return max(0.0, amplitude / (2 * np.sqrt(2)) + self._noise())
+        else:
+            return max(0.0, self._noise())
 
     def capture_waveform(self, channel, timebase_s):
-        # TODO (Session B — skip until measure_vpp works):
-        # synthesize v(t) = A*sin(2*pi*f*t) sampled across timebase_s,
-        # np.linspace or np.arange for the time axis, add noise per sample.
-        ...
+        sample_rate_hz = 20 * self._freq_hz
+        sample_size = round(sample_rate_hz * timebase_s)
+        t = np.linspace(0, timebase_s, sample_size, endpoint=False)
+
+        noise = np.random.normal(0.0, self.noise_vrms, size=t.shape)
+        amplitude, phase = self._signal_at(channel)
+
+        if self._output_on:
+            signal = (amplitude / 2) * np.sin(2 * np.pi * self._freq_hz * t + phase) + self._offset_v
+            waveform = signal + noise
+
+            return Waveform(waveform, sample_rate_hz)
+        else:
+            signal = 0.0
+            waveform = signal + noise
+
+            return Waveform(waveform, sample_rate_hz)
+
+
+
